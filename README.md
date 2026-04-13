@@ -2,7 +2,7 @@
 
 Python reproduction of **"A Suboptimal Routing Algorithm for Massive LEO Satellite Networks"** (Liu & Zhu, ISNCC 2018).
 
-Implements the Global Optimal Routing Algorithm (GORA) and the Approximate Optimal Routing Algorithm (AORA) for a 720-satellite, 46-gateway LEO constellation, and reproduces Figures 4–7 from the paper.
+Implements GORA and AORA for a 720-satellite, 46-gateway LEO constellation and reproduces Figures 4–7 from the paper.
 
 ---
 
@@ -16,7 +16,7 @@ Implements the Global Optimal Routing Algorithm (GORA) and the Approximate Optim
 | Walker phasing | 4.5° between adjacent planes |
 | Ground gateways | 46 globally distributed |
 | Gateway capacity | 920 Gbps each (42,320 Gbps total) |
-| Correlation matrix | 766 × 766 (M + N = 46 + 720) |
+| Correlation matrix | 766 × 766 (46 gateways + 720 satellites) |
 | Visibility threshold | Elevation angle ≥ 10° |
 
 ---
@@ -25,16 +25,17 @@ Implements the Global Optimal Routing Algorithm (GORA) and the Approximate Optim
 
 ```
 SubOptimalRoutingAlgoLEO/
-├── main.py                # Entry point
+├── main.py                 # entry point
 ├── requirements.txt
+├── evaluation_draft.md     # methodology, metrics, and preliminary results
 ├── src/
 │   ├── __init__.py
-│   ├── constellation.py   # Orbital mechanics, satellite positions, visibility
-│   ├── gateways.py        # 46 gateway coordinates (lat/lon)
-│   ├── routing.py         # GORA, AORA, Dijkstra wrapper, helper functions
-│   ├── simulation.py      # Main simulation loop
-│   └── plots.py           # Figure generation (Figs 4–7 + bonus)
-├── figures/               # Output figures (created at runtime)
+│   ├── constellation.py    # orbital mechanics, satellite positions, visibility
+│   ├── gateways.py         # 46 gateway coordinates (lat/lon)
+│   ├── routing.py          # GORA, AORA, Dijkstra wrapper, helper functions
+│   ├── simulation.py       # main simulation loop
+│   └── plots.py            # figure generation (Figs 4–7 + bonus)
+├── figures/                # output figures (created at runtime)
 └── README.md
 ```
 
@@ -52,17 +53,17 @@ SubOptimalRoutingAlgoLEO/
 ## Setup
 
 ```bash
-# 1. Clone / enter the project directory
+# 1. enter the project directory
 cd SubOptimalRoutingAlgoLEO
 
-# 2. (Optional) create a virtual environment
+# 2. (optional) create a virtual environment
 python -m venv venv
 # Windows:
 venv\Scripts\activate
 # Linux/macOS:
 source venv/bin/activate
 
-# 3. Install dependencies
+# 3. install dependencies
 pip install -r requirements.txt
 ```
 
@@ -70,11 +71,14 @@ pip install -r requirements.txt
 
 ## Running the simulation
 
-### Default run (reproduces all figures)
+### Default run
 
 ```bash
 python main.py
 ```
+
+Expected runtime: **2–4 minutes** on a typical laptop.
+For a quick preview: `python main.py --demands 50 --loads 7` (~30 seconds).
 
 Figures are saved to `figures/`:
 - `fig4_matrix_size.png`
@@ -87,56 +91,54 @@ Figures are saved to `figures/`:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--demands N` | 200 | Demands per traffic-load level |
+| `--demands N` | 200 | routing requests per traffic-load level |
 | `--radius R` | 600.0 | AORA extra search radius (km) |
-| `--seed S` | 42 | Random seed |
-| `--time T` | 0.0 | Satellite snapshot time (seconds) |
-| `--loads L` | 13 | Number of load levels in [0 %, 120 %] |
-| `--output DIR` | figures | Output directory |
+| `--seed S` | 42 | random seed |
+| `--time T` | 0.0 | satellite snapshot time (seconds) |
+| `--loads L` | 13 | number of load levels sampled in [0%, 120%] |
+| `--output DIR` | figures | output directory for figures |
 
-**Example — higher fidelity run:**
+**Higher fidelity run (~15–30 min):**
 ```bash
-python main.py --demands 500 --loads 25 --radius 700
+python main.py --demands 500 --loads 25
 ```
 
 ---
 
-## Reproducing main paper figures
-
-The figures directly correspond to the paper as follows:
+## Reproducing paper figures
 
 | Output file | Paper figure | Description |
 |---|---|---|
-| `fig4_matrix_size.png` | Fig. 4 | Correlation matrix node count vs load |
-| `fig5_comp_time.png` | Fig. 5 | Average Dijkstra computation time vs load |
-| `fig6_routing_capacity.png` | Fig. 6 | Fraction of demands routed vs load |
-| `fig7_delay.png` | Fig. 7 | Average end-to-end propagation delay vs load |
+| `fig4_matrix_size.png` | Fig. 4 | correlation matrix node count vs load |
+| `fig5_comp_time.png` | Fig. 5 | average Dijkstra computation time vs load |
+| `fig6_routing_capacity.png` | Fig. 6 | fraction of demands routed vs load |
+| `fig7_delay.png` | Fig. 7 | average end-to-end propagation delay vs load |
 
 Expected qualitative results:
-- **Fig 4/5**: AORA sub-matrix is significantly smaller than GORA's full 766-node matrix, with a proportionally lower computation time.
-- **Fig 6**: Both algorithms route ~100% of demands at low load; GORA maintains higher capacity as load increases above ~80%.
-- **Fig 7**: AORA delay is comparable to GORA (within a few ms) across all load levels, confirming "approximate optimality".
+- **Fig 4/5**: AORA sub-matrix is significantly smaller than GORA's full 766-node matrix, with proportionally lower computation time.
+- **Fig 6**: Both algorithms route ~100% of demands at low load; GORA maintains higher capacity above ~80% load.
+- **Fig 7**: AORA delay is within a few ms of GORA across all load levels, confirming approximate optimality.
 
 ---
 
-## Algorithm design notes
+## Algorithm notes
 
 ### Orbital model
-Analytical circular orbit with Walker-Delta phasing — no TLE data needed. RAAN is evenly distributed across 18 planes; mean anomaly uses the phasing offset of 4.5°.
+Analytical circular orbit with Walker-Delta phasing — no TLE data needed. RAAN is evenly distributed across 18 planes; mean anomaly includes the 4.5° phasing offset.
 
 ### Visibility
-Elevation angle ≥ 10° computed from ECEF Cartesian positions. Links that fail the threshold are set to `np.inf` in the correlation matrix.
+Elevation angle ≥ 10° computed from ECEF positions. Links below the threshold are set to `np.inf` in the correlation matrix.
 
-### Dijkstra implementation
-`scipy.sparse.csgraph.dijkstra` is used with `directed=False`. Because scipy treats weight 0 as "no edge", all valid edges receive a +1e-9 epsilon offset before solving; the offset is subtracted from the returned path cost.
+### Dijkstra
+`scipy.sparse.csgraph.dijkstra` with `directed=False`. scipy treats 0 as no edge, so all valid edges receive a +1e-9 offset before solving.
 
 ### AORA sub-matrix construction
 1. Compute spherical midpoint *k* of source and destination gateways.
-2. Radius *R* = haversine(*k*, source) + `extra_radius_km`.
+2. Set radius *R* = haversine(*k*, source) + `extra_radius_km`.
 3. Include all gateways within *R* of *k* (source/destination always included).
-4. Include all satellites with line-of-sight to any selected gateway.
-5. Extract the sub-correlation matrix; run Dijkstra.
-6. If no path is found, fall back to the full 766×766 matrix (GORA).
+4. Include all satellites visible to any selected gateway.
+5. Run Dijkstra on the sub-matrix.
+6. Fall back to the full 766×766 matrix if no path is found.
 
 ### Traffic model
-Demands are sampled uniformly at random from all 46 × 45 ordered gateway pairs. Each demand requests 1 Gbps. A demand is accepted only if no link along the chosen path would exceed 920 Gbps total load.
+Demands are sampled uniformly from all 46 × 45 ordered gateway pairs. Each demand requests 1 Gbps. A demand is accepted only if no link along the path would exceed 920 Gbps.
