@@ -58,11 +58,11 @@ def main():
     print()
 
     results = run_simulation(
-        num_demands         = args.demands,
-        traffic_load_levels = load_levels,
-        random_seed         = args.seed,
-        extra_radius_km     = args.radius,
-        time_s              = args.time,
+        numDemands             = args.demands,
+        trafficLoadLevels      = load_levels,
+        randomSeed             = args.seed,
+        extraSearchRadiusKm    = args.radius,
+        satelliteSnapshotTime  = args.time,
     )
 
     print("\n" + "=" * 60)
