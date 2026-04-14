@@ -67,4 +67,4 @@ TOTAL_CAPACITY_GBPS = NUM_GATEWAYS * GATEWAY_CAPACITY_GBPS # 42,320 Gbps
 
 # Convenience: list of (lat, lon) tuples
 GATEWAY_LOCATIONS = [(lat, lon) for _, lat, lon in GATEWAY_DATA]
-GATEWAY_NAMES     = [name for name, _, _  in GATEWAY_DATA]
+GATEWAY_NAMES = [name for name, _, _  in GATEWAY_DATA]

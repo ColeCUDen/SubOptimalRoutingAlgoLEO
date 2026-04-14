@@ -6,31 +6,33 @@ MU_KM3_S2 = 3.986004418e5 # Earth gravitational parameter
 
 NUM_PLANES = 18
 SATS_PER_PLANE = 40
-NUM_SATELLITES  = NUM_PLANES * SATS_PER_PLANE # 720
+NUM_SATELLITES  = NUM_PLANES * SATS_PER_PLANE # 720 total satellites
 
 ALTITUDE_KM = 1200.0
 INCLINATION_DEG = 90.0 # polar orbits
 PHASING_DEG = 4.5 # mean-anomaly offset between adjacent planes
 MIN_ELEVATION_DEG = 10.0 # link visibility threshold
 
+# deived orbital values
 ORBIT_RADIUS_KM = EARTH_RADIUS_KM + ALTITUDE_KM  # 7571 km
 ORBITAL_PERIOD_S = 2 * np.pi * np.sqrt(ORBIT_RADIUS_KM**3 / MU_KM3_S2) # ~6244 s
 MEAN_MOTION_RAD_S = 2 * np.pi / ORBITAL_PERIOD_S
 
 
+# satellite position at a given time
 def satellite_position_ecef(plane_idx: int, sat_idx: int, time_s: float = 0.0):
     inc  = np.radians(INCLINATION_DEG)
     raan = np.radians(plane_idx * 360.0 / NUM_PLANES)
 
+    # initial angle
     M0 = np.radians(sat_idx  * 360.0 / SATS_PER_PLANE + plane_idx * PHASING_DEG)
-    u = M0 + MEAN_MOTION_RAD_S * time_s   # current argument of latitude
+    u = M0 + MEAN_MOTION_RAD_S * time_s 
 
-    # Position in orbital plane
+    # current position in orbital plane
     x_orb = ORBIT_RADIUS_KM * np.cos(u)
     y_orb = ORBIT_RADIUS_KM * np.sin(u)
 
     # Rotate: first by inclination (tilt orbital plane), then by RAAN
-    # Rotation matrix R_z(RAAN) * R_x(inc)
     ci, si = np.cos(inc),  np.sin(inc)
     cr, sr = np.cos(raan), np.sin(raan)
 
@@ -41,8 +43,8 @@ def satellite_position_ecef(plane_idx: int, sat_idx: int, time_s: float = 0.0):
     return np.array([x, y, z])
 
 
+# converts the geodetic on Earth's surface to ECEF km
 def gateway_ecef(lat_deg: float, lon_deg: float) -> np.ndarray:
-    # Convert geodetic (lat, lon) on Earth's surface to ECEF km
     lat = np.radians(lat_deg)
     lon = np.radians(lon_deg)
     x = EARTH_RADIUS_KM * np.cos(lat) * np.cos(lon)
@@ -51,19 +53,20 @@ def gateway_ecef(lat_deg: float, lon_deg: float) -> np.ndarray:
     return np.array([x, y, z])
 
 
+# satellite elevation angle from gateway
 def elevation_angle_deg(gw_ecef: np.ndarray, sat_ecef: np.ndarray) -> float:
-    los = sat_ecef - gw_ecef
+    los = sat_ecef - gw_ecef # line of sight vector
     los_norm = los / np.linalg.norm(los)
-    up  = gw_ecef / np.linalg.norm(gw_ecef)
+    up  = gw_ecef / np.linalg.norm(gw_ecef) # local vertical
     sin_el = np.dot(los_norm, up)
     return np.degrees(np.arcsin(np.clip(sin_el, -1.0, 1.0)))
 
 
+# slant range distance from gateway to satellie
 def slant_range_km(gw_ecef: np.ndarray, sat_ecef: np.ndarray) -> float:
-    # Slant range (km) between gateway and satellite
     return float(np.linalg.norm(sat_ecef - gw_ecef))
 
-
+# compute all satellite positions at a given time
 def build_all_satellite_positions(time_s: float = 0.0) -> np.ndarray:
     positions = np.empty((NUM_SATELLITES, 3))
     for p in range(NUM_PLANES):
@@ -72,7 +75,7 @@ def build_all_satellite_positions(time_s: float = 0.0) -> np.ndarray:
             positions[idx] = satellite_position_ecef(p, s, time_s)
     return positions
 
-
+# determines which satellites are visible from every gateway
 def build_visibility_matrix(gateway_ecef_list: np.ndarray, satellite_ecef_arr: np.ndarray,min_el: float = MIN_ELEVATION_DEG):
     M = len(gateway_ecef_list)
     N = len(satellite_ecef_arr)
