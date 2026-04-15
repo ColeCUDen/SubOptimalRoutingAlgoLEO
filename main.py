@@ -13,7 +13,7 @@ def parseArgs():
     p.add_argument("--seed", type=int, default=42, help="random seed (default 42)")
     p.add_argument("--time", type=float, default=0.0, help="satellite snapshot time in seconds (default 0)")
     p.add_argument("--output", type=str, default="figures", help="output directory for figures (default figures)")
-    p.add_argument("--loads", type=int, default=13, help="number of load levels in [0%, 120%] (default 13)")
+    p.add_argument("--loads", type=int, default=13, help="number of load levels in [0%%, 120%%] (default 13)")
     return p.parse_args()
 
 

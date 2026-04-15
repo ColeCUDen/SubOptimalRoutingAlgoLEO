@@ -1,5 +1,3 @@
-.claude/
-
 # Python
 __pycache__/
 *.py[cod]
@@ -8,15 +6,6 @@ __pycache__/
 venv/
 env/
 
-# Figures output
-figures/*.png
-figures/*.pdf
-
-# Project documents
-Milestone 2.pdf
-Milestone 3.pdf
-Project Guidance (2).pdf
-A_Suboptimal_Routing_Algorithm_for_Massive_LEO_Satellite_Networks.pdf
-
 # Misc
 *.DS_Store
+.claude/
