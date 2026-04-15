@@ -1,4 +1,4 @@
-# LEO Satellite Routing - Liu & Zhu (2018) Reproduction
+# Suboptimal Routing Algorithm for Massive LEO Satellite Networks Reproduction
 
 Python reproduction of "A Suboptimal Routing Algorithm for Massive LEO Satellite Networks" (Liu & Zhu, 2018).
 
