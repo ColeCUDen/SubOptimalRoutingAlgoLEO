@@ -1,18 +1,17 @@
-"""
-routing.py
-GORA and AORA routing algorithms for the LEO satellite network.
+# routing.py
+# GORA and AORA routing algorithms for the LEO satellite network.
 
-Correlation matrix X indexing convention (follows the paper):
-  rows/cols  0 .. M-1          → gateways   (M = 46)
-  rows/cols  M .. M+N-1        → satellites (N = 720)
-  Total size: (M+N) x (M+N) = 766 x 766
+# Correlation matrix X indexing convention (follows the paper):
+#   rows/cols  0 .. M-1          → gateways   (M = 46)
+#   rows/cols  M .. M+N-1        → satellites (N = 720)
+#   Total size: (M+N) x (M+N) = 766 x 766
 
-Edge weight c_{i,j} = current traffic load (Gbps) on the link.
-  - 0.0   : link exists but carries no traffic (valid, low-cost edge)
-  - np.inf: no LOS / link does not exist
-scipy.sparse.csgraph.dijkstra treats 0 as "no edge", so we add EPS to all
-valid edges before calling it and subtract afterwards.
-"""
+# Edge weight c_{i,j} = current traffic load (Gbps) on the link.
+#   - 0.0   : link exists but carries no traffic (valid, low-cost edge)
+#   - np.inf: no LOS / link does not exist
+# scipy.sparse.csgraph.dijkstra treats 0 as "no edge", so we add EPS to all
+# valid edges before calling it and subtract afterwards.
+
 
 import time
 import numpy as np
@@ -25,33 +24,37 @@ from .constellation import (
     gateway_ecef,
 )
 
-# Epsilon offset so valid zero-load edges survive scipy's 0=no-edge convention
+
+# This Epsilon offset is necessary so valid zero-load edges survive scipy's
+# 0=no-edge convention
+
 _EPS = 1e-9
 
-# Speed of light (km/s)
+# Speed of light in km/s
 SPEED_OF_LIGHT_KM_S = 299_792.458
 
 
 # ─── Geometric helpers ────────────────────────────────────────────────────────
 
+# Standard haversine formula that takes two points as (lat, lon) in degrees,
+# and returns the great-circle distance in km between them along Earth's surface.
+# Used to decide which gateways to include in the sub-graph
 def haversine_distance_km(lat1: float, lon1: float,
                           lat2: float, lon2: float) -> float:
-    """Great-circle distance (km) between two (lat, lon) points in degrees."""
     R = EARTH_RADIUS_KM
     phi1, phi2 = np.radians(lat1), np.radians(lat2)
-    dphi  = phi2 - phi1
-    dlam  = np.radians(lon2 - lon1)
-    a = np.sin(dphi / 2)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlam / 2)**2
+    dPhi  = phi2 - phi1
+    dLam  = np.radians(lon2 - lon1)
+    a = np.sin(dPhi / 2)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(dLam / 2)**2
     return 2 * R * np.arcsin(np.sqrt(a))
 
 
+# Finds the point exactly halfway between two surface points. Method: average unit
+# Cartesian vectors, normalise, convert back to lat/lon. AORA uses this midpoint
+# as the center of its search region. If the two points are antipodal, it returns the
+# first point as fallback.
 def spherical_midpoint(lat1: float, lon1: float,
                        lat2: float, lon2: float):
-    """
-    Spherical midpoint between two surface points.
-    Method: average unit Cartesian vectors, normalise, convert back to lat/lon.
-    Returns (lat_deg, lon_deg).
-    """
     phi1, lam1 = np.radians(lat1), np.radians(lon1)
     phi2, lam2 = np.radians(lat2), np.radians(lon2)
 
@@ -62,316 +65,284 @@ def spherical_midpoint(lat1: float, lon1: float,
                    np.cos(phi2)*np.sin(lam2),
                    np.sin(phi2)])
 
-    vm = v1 + v2
-    nm = np.linalg.norm(vm)
-    if nm < 1e-12:
+    vecMid = v1 + v2
+    normMid = np.linalg.norm(vecMid)
+    if normMid < 1e-12:
         # antipodal points — return first point as fallback
         return lat1, lon1
-    vm /= nm
+    vecMid /= normMid
 
-    lat_m = np.degrees(np.arcsin(np.clip(vm[2], -1.0, 1.0)))
-    lon_m = np.degrees(np.arctan2(vm[1], vm[0]))
-    return lat_m, lon_m
+    latMid = np.degrees(np.arcsin(np.clip(vecMid[2], -1.0, 1.0)))
+    lonMid = np.degrees(np.arctan2(vecMid[1], vecMid[0]))
+    return latMid, lonMid
 
 
 # ─── Correlation matrix builder ───────────────────────────────────────────────
 
+# This builds the 766 x 766 matrix that represents the entire network as a graph.
+# Indices 0-45 = gateways, indices 46-765 = satellites
+# X[i][j] = load in Gbps if gateway i can see satellite j (has line-of-sight)
+# X[i][j] = inf if no link exists
+# Diagonal is 0 (node to itself)
+
 def build_correlation_matrix(
     gateway_locations,   # list of (lat, lon), length M
-    sat_ecef_arr,        # (N, 3) ndarray
+    satEcefArr,          # (N, 3) ndarray
     visible,             # (M, N) bool
-    ranges_km,           # (M, N) float
-    link_loads=None,     # (M, N) float or None → all zeros
+    rangesKm,            # (M, N) float
+    linkLoads=None,      # (M, N) float or None → all zeros
 ):
-    """
-    Build the (M+N)×(M+N) correlation matrix X.
-
-    X[i, j] = link load (Gbps)  if link exists (LOS)
-    X[i, j] = np.inf             if no link
-    Diagonal is 0.
-
-    Index mapping:
-      gateway  i  →  row/col i          (0 .. M-1)
-      satellite s  →  row/col M + s     (M .. M+N-1)
-    """
     M = len(gateway_locations)
-    N = len(sat_ecef_arr)
+    N = len(satEcefArr)
     size = M + N
 
     X = np.full((size, size), np.inf)
     np.fill_diagonal(X, 0.0)
 
-    if link_loads is None:
-        link_loads = np.zeros((M, N), dtype=float)
+    if linkLoads is None:
+        linkLoads = np.zeros((M, N), dtype=float)
 
     # Gateway ↔ Satellite edges — vectorised
-    gi, si = np.where(visible)           # indices of all visible (gw, sat) pairs
-    vals   = link_loads[gi, si]
-    X[gi,      M + si] = vals            # gw row → sat col
-    X[M + si,  gi    ] = vals            # sat row → gw col  (symmetric)
+    gwIdx, satIdx = np.where(visible)       # indices of all visible (gw, sat) pairs
+    vals = linkLoads[gwIdx, satIdx]
+    X[gwIdx,       M + satIdx] = vals       # gw row → sat col
+    X[M + satIdx,  gwIdx     ] = vals       # sat row → gw col  (symmetric)
 
     return X
 
 
 # ─── Dijkstra wrapper ─────────────────────────────────────────────────────────
 
-def dijkstra_on_matrix(weight_matrix: np.ndarray, source_idx: int, target_idx: int):
-    """
-    Run Dijkstra on a dense weight matrix.
-    - np.inf entries are treated as absent edges.
-    - Valid 0.0 entries get +EPS offset so scipy does not ignore them.
+# Shared Dijkstra wrapper that both GORA and AORA call.
+# np.inf entries are treated as absent edges, and valid
+# 0.0 entries get +EPS offset so scipy does not ignore them.
+# Steps:
+# 1. Copy the weight matrix
+# 2. Set all inf entries to 0 (scipy's "no edge" convention)
+# 3. Add _EPS to all valid edges so zero-load links aren't mistaken for missing edges
+# 4. Convert to sparse format and run scipy.sparse.csgraph.dijkstra
+# 5. If the target is unreachable, return empty path
+# 6. Otherwise, walk backwards through the predecessor array to reconstruct the path
+# (target → ... → source, then reverse)
+# 7. Subtract the accumulated epsilon from the total cost to get the true cost
+# Returns: (path as list of node indices, total cost)
 
-    Returns
-    -------
-    path       : list of node indices from source to target, or [] if unreachable
-    total_cost : float — sum of original edge weights along path
-    """
-    n = weight_matrix.shape[0]
+def dijkstra_on_matrix(weightMatrix: np.ndarray, sourceIdx: int, targetIdx: int):
+    n = weightMatrix.shape[0]
 
     # Build scipy-compatible matrix: 0 means no edge
-    W = weight_matrix.copy()
-    finite_mask = np.isfinite(W) & (W >= 0)
-    W[~finite_mask] = 0.0                  # absent edges → 0 (scipy convention)
-    W[finite_mask] += _EPS                 # valid edges  → >0
+    W = weightMatrix.copy()
+    finiteMask = np.isfinite(W) & (W >= 0)
+    W[~finiteMask] = 0.0                  # absent edges → 0 (scipy convention)
+    W[finiteMask] += _EPS                 # valid edges  → >0
 
-    np.fill_diagonal(W, 0.0)              # self-loops stay 0 (ignored by scipy)
+    np.fill_diagonal(W, 0.0)             # self-loops stay 0 (ignored by scipy)
 
-    sparse_W = csr_matrix(W)
-    dist_arr, pred_arr = sp_dijkstra(
-        sparse_W, directed=False,
-        indices=source_idx,
+    sparseW = csr_matrix(W)
+    distArr, predArr = sp_dijkstra(
+        sparseW, directed=False,
+        indices=sourceIdx,
         return_predecessors=True,
     )
 
-    if np.isinf(dist_arr[target_idx]):
+    if np.isinf(distArr[targetIdx]):
         return [], np.inf
 
     # Reconstruct path
     path = []
-    cur = target_idx
-    while cur != source_idx:
+    cur = targetIdx
+    while cur != sourceIdx:
         path.append(cur)
-        cur = pred_arr[cur]
+        cur = predArr[cur]
         if cur < 0:
             return [], np.inf
-    path.append(source_idx)
+    path.append(sourceIdx)
     path.reverse()
 
     # Total cost = sum of original (non-EPS) edge weights
-    total_cost = dist_arr[target_idx] - _EPS * (len(path) - 1)
-    return path, max(total_cost, 0.0)
+    totalCost = distArr[targetIdx] - _EPS * (len(path) - 1)
+    return path, max(totalCost, 0.0)
 
 
-def path_propagation_delay_ms(path: list, weight_matrix: np.ndarray,
-                               gateway_ecef_arr: np.ndarray,
-                               sat_ecef_arr: np.ndarray,
-                               num_gateways: int) -> float:
-    """
-    Compute total propagation delay (ms) along a path.
-    Delay per hop = slant_range_km / speed_of_light_km_s * 1000 ms.
-    """
+# Takes a path (list of node indices) and computes the real-world signal delay in milliseconds.
+# For each consecutive pair of nodes in the path, it:
+# 1. Looks up their ECEF (x,y,z) coordinates — gateway positions if index < 46, satellite positions otherwise
+# 2. Computes the Euclidean distance between them (slant range)
+# 3. Divides by speed of light, and multiplies by 1000 to get ms
+def path_propagation_delay_ms(path: list, weightMatrix: np.ndarray,
+                               gatewayEcefArr: np.ndarray,
+                               satEcefArr: np.ndarray,
+                               numGateways: int) -> float:
     if len(path) < 2:
         return 0.0
 
-    def node_ecef(idx):
-        if idx < num_gateways:
-            return gateway_ecef_arr[idx]
-        return sat_ecef_arr[idx - num_gateways]
+    def nodeEcef(idx):
+        if idx < numGateways:
+            return gatewayEcefArr[idx]
+        return satEcefArr[idx - numGateways]
 
-    total_ms = 0.0
+    totalMs = 0.0
     for a, b in zip(path[:-1], path[1:]):
-        dist_km   = np.linalg.norm(node_ecef(b) - node_ecef(a))
-        total_ms += dist_km / SPEED_OF_LIGHT_KM_S * 1000.0
-    return total_ms
+        distKm = np.linalg.norm(nodeEcef(b) - nodeEcef(a))
+        totalMs += distKm / SPEED_OF_LIGHT_KM_S * 1000.0
+    return totalMs
 
 
 # ─── GORA ─────────────────────────────────────────────────────────────────────
 
+# Global Optimal Routing Algorithm. Just computes Dijkstra's on the whole matrix.
+# Complexity: O((M+N)^2) per query.
+# route(srcGw, dstGw) starts a timer, calls dijkstra_on_matrix on the full matrix,
+# stops the timer, computes the propagation delay on the resulting path, and returns
+# the path, cost, matrixSize, delayMs, and compTimeMs.
 class GORA:
-    """
-    Global Optimal Routing Algorithm.
-    Runs Dijkstra on the full (M+N)×(M+N) correlation matrix.
-    Complexity: O((M+N)^2) per query.
-    """
 
-    def __init__(self, correlation_matrix: np.ndarray,
-                 gateway_ecef_arr: np.ndarray,
-                 sat_ecef_arr: np.ndarray,
-                 num_gateways: int):
-        self.X             = correlation_matrix
-        self.gw_ecef       = gateway_ecef_arr
-        self.sat_ecef      = sat_ecef_arr
-        self.M             = num_gateways
-        self.matrix_size   = correlation_matrix.shape[0]   # M + N
+    def __init__(self, correlationMatrix: np.ndarray,
+                 gatewayEcefArr: np.ndarray,
+                 satEcefArr: np.ndarray,
+                 numGateways: int):
+        self.X           = correlationMatrix
+        self.gwEcef      = gatewayEcefArr
+        self.satEcef     = satEcefArr
+        self.M           = numGateways
+        self.matrixSize  = correlationMatrix.shape[0]   # M + N
 
-    def route(self, src_gw: int, dst_gw: int):
-        """
-        Route between two gateway indices.
-
-        Returns
-        -------
-        path         : list of node indices
-        total_cost   : float
-        matrix_size  : int  (always M+N = 766)
-        delay_ms     : float
-        comp_time_ms : float
-        """
+    def route(self, srcGw: int, dstGw: int):
         t0 = time.perf_counter()
-        path, cost = dijkstra_on_matrix(self.X, src_gw, dst_gw)
-        comp_time_ms = (time.perf_counter() - t0) * 1000.0
+        path, cost = dijkstra_on_matrix(self.X, srcGw, dstGw)
+        compTimeMs = (time.perf_counter() - t0) * 1000.0
 
-        delay_ms = path_propagation_delay_ms(
-            path, self.X, self.gw_ecef, self.sat_ecef, self.M
+        delayMs = path_propagation_delay_ms(
+            path, self.X, self.gwEcef, self.satEcef, self.M
         ) if path else np.inf
 
-        return path, cost, self.matrix_size, delay_ms, comp_time_ms
+        return path, cost, self.matrixSize, delayMs, compTimeMs
 
 
 # ─── AORA ─────────────────────────────────────────────────────────────────────
 
+# Approximate Optimal Routing Algorithm.
+# Reduces the correlation matrix by selecting only gateways near the
+# spherical midpoint of the source–destination pair, then runs Dijkstra
+# on the smaller sub-matrix.  Falls back to GORA if no path is found.
+#
+# _selectSubgraphIndices(srcGw, dstGw) selects the gateway and satellite
+# indices for the sub-correlation matrix.
+# Steps:
+# 1. Compute spherical midpoint k of src and dst.
+# 2. dKp = haversine(k, srcGw).
+# 3. Radius R = dKp + extraRadiusKm.
+# 4. Include all gateways g where haversine(k, g) <= R. (src and dst are always included.)
+# 5. Include all satellites visible from any selected gateway.
+# Returns: gwIndices  : sorted list of gateway indices in the sub-matrix
+#          satIndices : sorted list of satellite indices in the sub-matrix
+#
+# _buildSubmatrix(gwIndices, satIndices) extracts the sub-correlation matrix and returns it
+# and the index mappings for the gateways and satellites.
+#
+# route(srcGw, dstGw) routes between two gateway indices using the sub-matrix Dijkstra. It
+# falls back to full matrix (GORA) if there is no path found in the sub-matrix. It returns:
+# path, cost, subSize, delayMs, compTimeMs, usedFallback
+
 class AORA:
-    """
-    Approximate Optimal Routing Algorithm.
-    Reduces the correlation matrix by selecting only gateways near the
-    spherical midpoint of the source–destination pair, then runs Dijkstra
-    on the smaller sub-matrix.  Falls back to GORA if no path is found.
-    """
 
-    def __init__(self, correlation_matrix: np.ndarray,
-                 gateway_locations,          # list of (lat, lon)
-                 gateway_ecef_arr: np.ndarray,
-                 sat_ecef_arr: np.ndarray,
+    def __init__(self, correlationMatrix: np.ndarray,
+                 gatewayLocations,              # list of (lat, lon)
+                 gatewayEcefArr: np.ndarray,
+                 satEcefArr: np.ndarray,
                  visible: np.ndarray,
-                 num_gateways: int,
-                 extra_radius_km: float = 600.0):
-        self.X            = correlation_matrix
-        self.gw_locs      = gateway_locations
-        self.gw_ecef      = gateway_ecef_arr
-        self.sat_ecef     = sat_ecef_arr
+                 numGateways: int,
+                 extraRadiusKm: float = 600.0):
+        self.X            = correlationMatrix
+        self.gwLocs       = gatewayLocations
+        self.gwEcef       = gatewayEcefArr
+        self.satEcef      = satEcefArr
         self.visible      = visible           # (M, N) bool
-        self.M            = num_gateways
-        self.N            = len(sat_ecef_arr)
-        self.extra_radius = extra_radius_km
+        self.M            = numGateways
+        self.N            = len(satEcefArr)
+        self.extraRadius  = extraRadiusKm
 
-    def _select_subgraph_indices(self, src_gw: int, dst_gw: int):
-        """
-        Select gateway and satellite indices for the sub-correlation matrix.
+    def _selectSubgraphIndices(self, srcGw: int, dstGw: int):
+        latS, lonS = self.gwLocs[srcGw]
+        latD, lonD = self.gwLocs[dstGw]
 
-        Steps (from the paper):
-          1. Compute spherical midpoint k of src and dst.
-          2. D_kp = haversine(k, src_gw).
-          3. Radius R = D_kp + extra_radius_km.
-          4. Include all gateways g where haversine(k, g) <= R.
-             (src and dst are always included.)
-          5. Include all satellites visible from any selected gateway.
-
-        Returns
-        -------
-        gw_indices  : sorted list of gateway indices in the sub-matrix
-        sat_indices : sorted list of satellite indices in the sub-matrix
-        """
-        lat_s, lon_s = self.gw_locs[src_gw]
-        lat_d, lon_d = self.gw_locs[dst_gw]
-
-        lat_k, lon_k = spherical_midpoint(lat_s, lon_s, lat_d, lon_d)
-        D_kp = haversine_distance_km(lat_k, lon_k, lat_s, lon_s)
-        R    = D_kp + self.extra_radius
+        latK, lonK = spherical_midpoint(latS, lonS, latD, lonD)
+        dKp = haversine_distance_km(latK, lonK, latS, lonS)
+        R   = dKp + self.extraRadius
 
         # Select gateways within radius R of midpoint
-        gw_set = set([src_gw, dst_gw])
-        for g, (lat_g, lon_g) in enumerate(self.gw_locs):
-            if haversine_distance_km(lat_k, lon_k, lat_g, lon_g) <= R:
-                gw_set.add(g)
-        gw_indices = sorted(gw_set)
+        gwSet = set([srcGw, dstGw])
+        for g, (latG, lonG) in enumerate(self.gwLocs):
+            if haversine_distance_km(latK, lonK, latG, lonG) <= R:
+                gwSet.add(g)
+        gwIndices = sorted(gwSet)
 
         # Select satellites visible from any selected gateway
-        sat_set = set()
-        for g in gw_indices:
-            sat_set.update(np.where(self.visible[g])[0].tolist())
-        sat_indices = sorted(sat_set)
+        satSet = set()
+        for g in gwIndices:
+            satSet.update(np.where(self.visible[g])[0].tolist())
+        satIndices = sorted(satSet)
 
-        return gw_indices, sat_indices
+        return gwIndices, satIndices
 
-    def _build_submatrix(self, gw_indices, sat_indices):
-        """
-        Extract the sub-correlation matrix and return index mappings.
-
-        Returns
-        -------
-        sub_X      : (m+n) × (m+n) sub-matrix
-        gw_map     : dict  global_gw_idx  → local_idx
-        sat_map    : dict  global_sat_idx → local_idx (offset by m)
-        """
-        m = len(gw_indices)
-        n = len(sat_indices)
+    def _buildSubmatrix(self, gwIndices, satIndices):
+        m = len(gwIndices)
+        n = len(satIndices)
         size = m + n
-        sub_X = np.full((size, size), np.inf)
-        np.fill_diagonal(sub_X, 0.0)
+        subX = np.full((size, size), np.inf)
+        np.fill_diagonal(subX, 0.0)
 
-        gw_map  = {g: i       for i, g in enumerate(gw_indices)}
-        sat_map = {s: m + j   for j, s in enumerate(sat_indices)}
+        gwMap  = {g: i       for i, g in enumerate(gwIndices)}
+        satMap = {s: m + j   for j, s in enumerate(satIndices)}
 
-        for g in gw_indices:
-            for s in sat_indices:
+        for g in gwIndices:
+            for s in satIndices:
                 if self.visible[g, s]:
-                    li = gw_map[g]
-                    lj = sat_map[s]
+                    localGw  = gwMap[g]
+                    localSat = satMap[s]
                     val = self.X[g, self.M + s]
-                    sub_X[li, lj] = val
-                    sub_X[lj, li] = val
+                    subX[localGw, localSat] = val
+                    subX[localSat, localGw] = val
 
-        return sub_X, gw_map, sat_map
+        return subX, gwMap, satMap
 
-    def route(self, src_gw: int, dst_gw: int):
-        """
-        Route between two gateway indices using sub-matrix Dijkstra.
-        Falls back to full matrix (GORA) if no path found in sub-matrix.
-
-        Returns
-        -------
-        path          : list of *global* node indices
-        total_cost    : float
-        sub_size      : int   (size of sub-matrix used)
-        delay_ms      : float
-        comp_time_ms  : float
-        used_fallback : bool
-        """
+    def route(self, srcGw: int, dstGw: int):
         t0 = time.perf_counter()
 
-        gw_indices, sat_indices = self._select_subgraph_indices(src_gw, dst_gw)
-        sub_X, gw_map, sat_map  = self._build_submatrix(gw_indices, sat_indices)
+        gwIndices, satIndices = self._selectSubgraphIndices(srcGw, dstGw)
+        subX, gwMap, satMap   = self._buildSubmatrix(gwIndices, satIndices)
 
-        sub_src = gw_map[src_gw]
-        sub_dst = gw_map[dst_gw]
-        sub_size = sub_X.shape[0]
+        subSrc  = gwMap[srcGw]
+        subDst  = gwMap[dstGw]
+        subSize = subX.shape[0]
 
-        sub_path, cost = dijkstra_on_matrix(sub_X, sub_src, sub_dst)
+        subPath, cost = dijkstra_on_matrix(subX, subSrc, subDst)
 
-        used_fallback = False
+        usedFallback = False
 
-        if not sub_path:
+        if not subPath:
             # Fallback: use full correlation matrix
-            used_fallback = True
-            sub_size = self.X.shape[0]
-            global_path, cost = dijkstra_on_matrix(self.X, src_gw, dst_gw)
+            usedFallback = True
+            subSize = self.X.shape[0]
+            globalPath, cost = dijkstra_on_matrix(self.X, srcGw, dstGw)
         else:
             # Map local indices back to global indices
-            inv_gw  = {v: k for k, v in gw_map.items()}
-            inv_sat = {v: k for k, v in sat_map.items()}
+            invGw  = {v: k for k, v in gwMap.items()}
+            invSat = {v: k for k, v in satMap.items()}
 
-            global_path = []
-            for local_idx in sub_path:
-                if local_idx in inv_gw:
-                    global_path.append(inv_gw[local_idx])
+            globalPath = []
+            for localIdx in subPath:
+                if localIdx in invGw:
+                    globalPath.append(invGw[localIdx])
                 else:
                     # satellite: local → global satellite idx → global matrix idx
-                    global_sat = inv_sat[local_idx]
-                    global_path.append(self.M + global_sat)
+                    globalSat = invSat[localIdx]
+                    globalPath.append(self.M + globalSat)
 
-        comp_time_ms = (time.perf_counter() - t0) * 1000.0
+        compTimeMs = (time.perf_counter() - t0) * 1000.0
 
-        delay_ms = path_propagation_delay_ms(
-            global_path, self.X, self.gw_ecef, self.sat_ecef, self.M
-        ) if global_path else np.inf
+        delayMs = path_propagation_delay_ms(
+            globalPath, self.X, self.gwEcef, self.satEcef, self.M
+        ) if globalPath else np.inf
 
-        return global_path, cost, sub_size, delay_ms, comp_time_ms, used_fallback
+        return globalPath, cost, subSize, delayMs, compTimeMs, usedFallback
