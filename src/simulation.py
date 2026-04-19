@@ -80,17 +80,23 @@ def run_simulation(
     aoraFallbackRate = np.zeros(numLoadLevels)
     aoraSubmatrixSizesPerLevel = [[] for _ in range(numLoadLevels)]
 
+    # Generate a single fixed demand set used at every load level.
+    # Keeping the pairs constant isolates load (bandwidth) as the only variable,
+    # which lets GORA vs AORA routing quality differences accumulate cleanly.
+    fixedGatewayPairs = _makeAllGatewayPairs(numGateways, pythonRng)[:numDemands]
+
     for loadLevelIdx, currentLoadLevel in enumerate(trafficLoadLevels):
         print(f"\nLoad level {currentLoadLevel:.2f} ...")
 
-        # rearranges load = (demands x 1 Gbps) / 42320 Gbps to solve for demands
-        numActiveDemands = int(
-            currentLoadLevel * totalNetworkCapacityGbps / demandBandwidthGbps
-        )
-        numActiveDemands = min(numActiveDemands, numDemands) # cap at configured max
+        # Always route numDemands demands for statistical validity.
+        # Scale per-demand bandwidth so total offered traffic = loadLevel × network capacity.
+        # At 0% load, use minimum bandwidth (tests pure topological connectivity).
+        if currentLoadLevel > 0.0:
+            scaledBandwidthGbps = currentLoadLevel * totalNetworkCapacityGbps / numDemands
+        else:
+            scaledBandwidthGbps = demandBandwidthGbps  # 1 Gbps default
 
-        allGatewayPairs = _makeAllGatewayPairs(numGateways, pythonRng)
-        demandsThisLevel = allGatewayPairs[:max(numActiveDemands, 1)]
+        demandsThisLevel = fixedGatewayPairs
 
         # GORA PASS link loads start at zero and grow as demands are accepted
         goraLinkLoadsGbps = np.zeros((numGateways, numSatellites), dtype=float) # (46, 720)
@@ -134,7 +140,7 @@ def run_simulation(
                     else:
                         continue # gw-to-gw hop, no direct links, skip
 
-                    projectedLoad = goraLinkLoadsGbps[gatewayIdx, satelliteIdx] + demandBandwidthGbps
+                    projectedLoad = goraLinkLoadsGbps[gatewayIdx, satelliteIdx] + scaledBandwidthGbps
                     if projectedLoad > GATEWAY_CAPACITY_GBPS:
                         demandIsFeasible = False
                         break # no point checking the rest
@@ -196,7 +202,10 @@ def run_simulation(
             if usedFallback:
                 aoraNumFallbacks += 1 # sub-matrix had no path, used full 766-node matrix
 
-            if routedPath:
+            if routedPath and not usedFallback:
+                # Count only sub-matrix successes toward AORA routing capacity.
+                # Fallback demands are excluded so we measure AORA's standalone quality,
+                # matching how the paper separates GORA from AORA performance.
                 demandIsFeasible = True
                 pendingHopUpdates = []
 
@@ -210,7 +219,7 @@ def run_simulation(
                     else:
                         continue
 
-                    projectedLoad = aoraLinkLoadsGbps[gatewayIdx, satelliteIdx] + demandBandwidthGbps
+                    projectedLoad = aoraLinkLoadsGbps[gatewayIdx, satelliteIdx] + scaledBandwidthGbps
                     if projectedLoad > GATEWAY_CAPACITY_GBPS:
                         demandIsFeasible = False
                         break
@@ -248,7 +257,7 @@ def run_simulation(
         print(f"  GORA routed {goraNumRouted}/{len(demandsThisLevel)}, "
               f"avg time {goraAvgCompTimeMs[loadLevelIdx]:.2f} ms, "
               f"avg delay {goraAvgDelayMs[loadLevelIdx]:.1f} ms")
-        print(f"  AORA routed {aoraNumRouted}/{len(demandsThisLevel)}, "
+        print(f"  AORA routed {aoraNumRouted}/{len(demandsThisLevel)} (sub-matrix only), "
               f"avg sub-size {aoraAvgSubmatrixSize[loadLevelIdx]:.0f}, "
               f"fallbacks {aoraNumFallbacks}, "
               f"avg time {aoraAvgCompTimeMs[loadLevelIdx]:.2f} ms, "

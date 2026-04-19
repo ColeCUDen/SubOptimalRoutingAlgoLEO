@@ -118,7 +118,7 @@ def plot_transmission_delay(results: dict, outputDir: str = "figures"):
 
     ax.set_xlabel("Traffic Load (%)", fontsize=12)
     ax.set_ylabel("Average Transmission Delay (ms)", fontsize=12)
-    ax.set_title("Fig. 7 - Transmission Delay vs Traffic Load", fontsize=13)
+    ax.set_title("Fig. 7 - Propagation Delay vs Traffic Load", fontsize=13)
     ax.legend(fontsize=11)
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.set_xlim(left=0)
@@ -141,9 +141,19 @@ def plot_submatrix_size_distribution(results: dict, outputDir: str = "figures"):
 
     fullSize = results["full_matrix_size"]
 
+    # Separate genuine sub-matrices from full-network demands (fallback or full-coverage pairs)
+    subSizes = [s for s in allSizes if s < fullSize]
+    fullCount = len(allSizes) - len(subSizes)
+
     fig, ax = plt.subplots(figsize=figSize)
-    ax.hist(allSizes, bins=30, color=colors["aora"], edgecolor="white", alpha=0.8, label="AORA sub-matrix")
+    ax.hist(subSizes, bins=30, color=colors["aora"], edgecolor="white", alpha=0.8, label="AORA sub-matrix")
     ax.axvline(fullSize, color=colors["gora"], linestyle="--", linewidth=2, label=f"GORA full ({fullSize} nodes)")
+
+    if fullCount > 0:
+        yMax = ax.get_ylim()[1]
+        ax.text(fullSize - 20, yMax * 0.55,
+                f"{fullCount} demands\n(fallback / full\ncoverage)",
+                ha="right", fontsize=9, color=colors["gora"])
 
     ax.set_xlabel("Sub-matrix Node Count", fontsize=12)
     ax.set_ylabel("Frequency", fontsize=12)
